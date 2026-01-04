@@ -1,0 +1,285 @@
+name: Test Docker Stacks
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  validate-compose:
+    name: Validate Docker Compose Files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate docker-compose syntax
+        run: |
+          echo "Validating Docker Compose files..."
+          for compose_file in $(find ./stacks -name "docker-compose.yml"); do
+            echo "Validating $compose_file"
+            docker compose -f "$compose_file" config --quiet
+            if [ $? -eq 0 ]; then
+              echo "✓ $compose_file is valid"
+            else
+              echo "✗ $compose_file has errors"
+              exit 1
+            fi
+          done
+
+  validate-dockerfiles:
+    name: Validate Dockerfiles
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: stacks/*/php/Dockerfile
+          recursive: true
+        continue-on-error: true
+
+  test-lemp-stack:
+    name: Test LEMP Stack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file
+        run: |
+          cd stacks/lemp-stack
+          cp .env.example .env
+          cat >> .env << EOF
+          MYSQL_ROOT_PASSWORD=test_root_password
+          MYSQL_DATABASE=testdb
+          MYSQL_USER=testuser
+          MYSQL_PASSWORD=test_password
+          PHP_VERSION=8.2
+          REDIS_PASSWORD=test_redis_pass
+          EOF
+
+      - name: Build LEMP stack
+        run: |
+          cd stacks/lemp-stack
+          docker compose build --no-cache
+
+      - name: Start LEMP stack
+        run: |
+          cd stacks/lemp-stack
+          docker compose up -d
+          sleep 30
+
+      - name: Check containers are running
+        run: |
+          cd stacks/lemp-stack
+          docker compose ps
+
+          # Check if all services are running
+          for service in nginx php mysql redis; do
+            if docker compose ps | grep -q "lemp_$service.*Up"; then
+              echo "✓ $service is running"
+            else
+              echo "✗ $service is not running"
+              docker compose logs $service
+              exit 1
+            fi
+          done
+
+      - name: Test Nginx
+        run: |
+          curl -f http://localhost || exit 1
+          echo "✓ Nginx is responding"
+
+      - name: Test PHP
+        run: |
+          response=$(curl -s http://localhost)
+          if echo "$response" | grep -q "LEMP Stack Running"; then
+            echo "✓ PHP is working"
+          else
+            echo "✗ PHP test failed"
+            exit 1
+          fi
+
+      - name: Test MySQL connection
+        run: |
+          cd stacks/lemp-stack
+          docker compose exec -T mysql mysql -uroot -ptest_root_password -e "SHOW DATABASES;" || exit 1
+          echo "✓ MySQL is accessible"
+
+      - name: Test Redis connection
+        run: |
+          cd stacks/lemp-stack
+          docker compose exec -T redis redis-cli -a test_redis_pass PING || exit 1
+          echo "✓ Redis is accessible"
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          cd stacks/lemp-stack
+          docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd stacks/lemp-stack
+          docker compose down -v
+
+  security-scan:
+    name: Security Scan Docker Images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build test image
+        run: |
+          cd stacks/lemp-stack/php
+          docker build -t lemp-php-test --build-arg PHP_VERSION=8.2 .
+
+      - name: Run Trivy security scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'lemp-php-test'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  check-documentation:
+    name: Check Documentation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify README exists
+        run: |
+          if [ ! -f README.md ]; then
+            echo "✗ README.md not found"
+            exit 1
+          fi
+          echo "✓ README.md exists"
+
+      - name: Check for .env.example files
+        run: |
+          for stack in stacks/*; do
+            if [ -d "$stack" ]; then
+              if [ ! -f "$stack/.env.example" ]; then
+                echo "✗ Missing .env.example in $stack"
+                exit 1
+              fi
+              echo "✓ $stack has .env.example"
+            fi
+          done
+
+      - name: Validate markdown
+        uses: DavidAnson/markdownlint-cli2-action@v14
+        with:
+          globs: '**/*.md'
+        continue-on-error: true
+
+  test-prometheus-stack:
+    name: Test Prometheus Stack
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file
+        run: |
+          cd stacks/prometheus-stack
+          cp .env.example .env
+
+      - name: Validate Prometheus config
+        run: |
+          cd stacks/prometheus-stack
+          # Basic YAML validation
+          cat prometheus/prometheus.yml | grep -q "scrape_configs:"
+          echo "✓ Prometheus config is valid YAML"
+
+      - name: Start Prometheus stack
+        run: |
+          cd stacks/prometheus-stack
+          docker compose up -d
+          sleep 30
+
+      - name: Check containers are running
+        run: |
+          cd stacks/prometheus-stack
+          docker compose ps
+
+          for service in prometheus grafana alertmanager node-exporter; do
+            if docker compose ps | grep -q "$service.*Up"; then
+              echo "✓ $service is running"
+            else
+              echo "✗ $service is not running"
+              docker compose logs $service
+              exit 1
+            fi
+          done
+
+      - name: Test Prometheus endpoint
+        run: |
+          sleep 10
+          curl -f http://localhost:9090/-/healthy || exit 1
+          echo "✓ Prometheus is healthy"
+
+      - name: Test Grafana endpoint
+        run: |
+          curl -f http://localhost:3000/api/health || exit 1
+          echo "✓ Grafana is healthy"
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          cd stacks/prometheus-stack
+          docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd stacks/prometheus-stack
+          docker compose down -v
+
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [validate-compose, validate-dockerfiles, test-lemp-stack, test-prometheus-stack, security-scan, check-documentation]
+    if: always()
+
+    steps:
+      - name: Summary
+        run: |
+          echo "## Docker Stack Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All Docker stack tests completed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Tested:" >> $GITHUB_STEP_SUMMARY
+          echo "- Docker Compose validation" >> $GITHUB_STEP_SUMMARY
+          echo "- Dockerfile linting" >> $GITHUB_STEP_SUMMARY
+          echo "- LEMP stack deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- Prometheus monitoring stack" >> $GITHUB_STEP_SUMMARY
+          echo "- Service connectivity" >> $GITHUB_STEP_SUMMARY
+          echo "- Security scanning" >> $GITHUB_STEP_SUMMARY

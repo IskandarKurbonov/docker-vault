@@ -1,0 +1,53 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker volumes and data
+**/data/
+**/mysql-data/
+**/redis-data/
+**/postgres-data/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Log files
+**/logs/
+*.log
+
+# Backup files
+**/backups/
+*.sql
+*.sql.gz
+*.tar.gz
+*.backup
+
+# SSL certificates (keep examples)
+**/ssl/*.crt
+**/ssl/*.key
+**/ssl/*.pem
+!**/ssl/example.*
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Application data
+**/www/vendor/
+**/www/node_modules/
+**/www/uploads/
+
+# Cache
+**/cache/
+*.cache
